@@ -1,0 +1,17 @@
+{
+  "type": "crm-card",
+  "data": {
+    "title": "求人一覧",
+    "description": "求人検索と関連付け（Deal自動作成）",
+    "uid": "job_matching_tab_card",
+    "location": "crm.record.tab",
+    "module": {
+      "file": "JobMatchingCard.jsx"
+    },
+    "objectTypes": [
+      {
+        "name": "contacts"
+      }
+    ]
+  }
+}

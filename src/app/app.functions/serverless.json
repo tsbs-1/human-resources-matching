@@ -1,0 +1,8 @@
+{
+  "appFunctions": {
+    "jobMatching": {
+      "file": "match-jobs.js",
+      "secrets": []
+    }
+  }
+}

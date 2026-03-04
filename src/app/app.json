@@ -1,0 +1,22 @@
+{
+  "name": "HR Matching App",
+  "description": "Contact record tab for job matching and one-click deal creation between contacts and custom job object.",
+  "uid": "hr_matching_app",
+  "scopes": [
+    "crm.objects.contacts.read",
+    "crm.objects.custom.read",
+    "crm.objects.custom.write",
+    "crm.objects.deals.read",
+    "crm.objects.deals.write"
+  ],
+  "public": false,
+  "extensions": {
+    "crm": {
+      "cards": [
+        {
+          "file": "extensions/job-matching-card.json"
+        }
+      ]
+    }
+  }
+}

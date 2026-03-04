@@ -1,0 +1,308 @@
+const hubspot = require("@hubspot/api-client");
+
+const JOB_OBJECT_TYPE_ID = "2-32777837";
+const DEAL_OBJECT_TYPE_ID = "0-3";
+const DEAL_PIPELINE_ID = "17914384";
+const INITIAL_DEAL_STAGE_ID = "45226048";
+
+const JOB_PROPERTIES = [
+  "job_id",
+  "job_name",
+  "location",
+  "naiyou",
+  "saiyou",
+  "salary",
+  "skill",
+  "syokusyu",
+];
+
+const toStringOrEmpty = (value) => {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return String(value).trim();
+};
+
+const parseErrorMessage = (error) => {
+  if (error?.response?.body?.message) {
+    return error.response.body.message;
+  }
+  if (error?.response?.body?.category) {
+    return `${error.response.body.category}: ${error.response.body.message || "unknown error"}`;
+  }
+  if (error?.message) {
+    return error.message;
+  }
+  return "unknown error";
+};
+
+const getHubSpotClient = () =>
+  new hubspot.Client({
+    accessToken: process.env["PRIVATE_APP_ACCESS_TOKEN"],
+  });
+
+const searchJobs = async (client, parameters = {}) => {
+  const { filters = {}, after = null, pageSize = 50 } = parameters;
+  const location = toStringOrEmpty(filters.location);
+  const syokusyu = toStringOrEmpty(filters.syokusyu);
+  const skills = Array.isArray(filters.skills)
+    ? filters.map(toStringOrEmpty).filter(Boolean)
+    : [];
+
+  const commonFilters = [];
+  if (location) {
+    commonFilters.push({
+      propertyName: "location",
+      operator: "EQ",
+      value: location,
+    });
+  }
+  if (syokusyu) {
+    commonFilters.push({
+      propertyName: "syokusyu",
+      operator: "EQ",
+      value: syokusyu,
+    });
+  }
+
+  let filterGroups = [];
+  if (skills.length > 0) {
+    filterGroups = skills.map((skill) => ({
+      filters: [
+        ...commonFilters,
+        {
+          propertyName: "skill",
+          operator: "CONTAINS_TOKEN",
+          value: skill,
+        },
+      ],
+    }));
+  } else if (commonFilters.length > 0) {
+    filterGroups = [{ filters: commonFilters }];
+  }
+
+  const body = {
+    limit: Math.min(Number(pageSize) || 50, 50),
+    properties: JOB_PROPERTIES,
+    after: after || undefined,
+    filterGroups: filterGroups.length > 0 ? filterGroups : undefined,
+  };
+
+  const response = await client.apiRequest({
+    method: "POST",
+    path: `/crm/v3/objects/${JOB_OBJECT_TYPE_ID}/search`,
+    body,
+  });
+
+  return {
+    jobs: (response.body.results || []).map((record) => ({
+      id: record.id,
+      properties: record.properties || {},
+    })),
+    paging: {
+      nextAfter: response.body?.paging?.next?.after || null,
+    },
+  };
+};
+
+const getPropertyOptions = async (client, propertyName) => {
+  const response = await client.apiRequest({
+    method: "GET",
+    path: `/crm/v3/properties/${JOB_OBJECT_TYPE_ID}/${propertyName}`,
+  });
+
+  return (response.body.options || [])
+    .map((option) => toStringOrEmpty(option.value))
+    .filter(Boolean);
+};
+
+const deriveUniqueValuesFromRecords = async (client, propertyName, splitValues) => {
+  const response = await client.apiRequest({
+    method: "POST",
+    path: `/crm/v3/objects/${JOB_OBJECT_TYPE_ID}/search`,
+    body: {
+      limit: 200,
+      properties: [propertyName],
+    },
+  });
+
+  const values = new Set();
+  for (const record of response.body.results || []) {
+    const rawValue = toStringOrEmpty(record.properties?.[propertyName]);
+    if (!rawValue) {
+      continue;
+    }
+    if (!splitValues) {
+      values.add(rawValue);
+      continue;
+    }
+    rawValue
+      .split(/[;,、]/)
+      .map((v) => toStringOrEmpty(v))
+      .filter(Boolean)
+      .forEach((v) => values.add(v));
+  }
+  return [...values];
+};
+
+const getFilterOptions = async (client) => {
+  let skillOptions = [];
+  let syokusyuOptions = [];
+
+  try {
+    skillOptions = await getPropertyOptions(client, "skill");
+  } catch (error) {
+    skillOptions = [];
+  }
+
+  try {
+    syokusyuOptions = await getPropertyOptions(client, "syokusyu");
+  } catch (error) {
+    syokusyuOptions = [];
+  }
+
+  if (skillOptions.length === 0) {
+    skillOptions = await deriveUniqueValuesFromRecords(client, "skill", true);
+  }
+  if (syokusyuOptions.length === 0) {
+    syokusyuOptions = await deriveUniqueValuesFromRecords(client, "syokusyu", false);
+  }
+
+  return {
+    skillOptions: skillOptions.sort((a, b) => a.localeCompare(b, "ja")),
+    syokusyuOptions: syokusyuOptions.sort((a, b) => a.localeCompare(b, "ja")),
+  };
+};
+
+const getAssociationTypeId = async (client, fromObjectType, toObjectType) => {
+  const response = await client.apiRequest({
+    method: "GET",
+    path: `/crm/v3/associations/${fromObjectType}/${toObjectType}/types`,
+  });
+
+  const candidates = response.body.results || [];
+  if (candidates.length === 0) {
+    throw new Error(`Association type not found: ${fromObjectType} -> ${toObjectType}`);
+  }
+
+  const preferred = candidates.find((type) =>
+    toStringOrEmpty(type.name).startsWith(`${fromObjectType}_to_`)
+  );
+  const selected = preferred || candidates[0];
+  return Number(selected.id);
+};
+
+const createDealsAndAssociations = async (client, context, parameters = {}) => {
+  const contactId =
+    toStringOrEmpty(parameters.contactId) ||
+    toStringOrEmpty(context?.propertiesToSend?.hs_object_id);
+  if (!contactId) {
+    throw new Error("contactId is required");
+  }
+
+  const selectedJobs = Array.isArray(parameters.selectedJobs)
+    ? parameters.selectedJobs
+    : [];
+  if (selectedJobs.length === 0) {
+    return {
+      successCount: 0,
+      failureCount: 0,
+      failures: [],
+    };
+  }
+
+  const firstName = toStringOrEmpty(context?.propertiesToSend?.firstname);
+  const lastName = toStringOrEmpty(context?.propertiesToSend?.lastname);
+  const ownerId = toStringOrEmpty(context?.propertiesToSend?.hubspot_owner_id);
+  const candidateName = `${lastName}${firstName}` || "求職者";
+
+  const dealToContactTypeId = await getAssociationTypeId(client, "deals", "contacts");
+  const dealToJobTypeId = await getAssociationTypeId(client, "deals", JOB_OBJECT_TYPE_ID);
+
+  let successCount = 0;
+  const failures = [];
+
+  for (const selectedJob of selectedJobs) {
+    const jobId = toStringOrEmpty(selectedJob.id);
+    const jobName = toStringOrEmpty(selectedJob.job_name) || `求人${jobId}`;
+    if (!jobId) {
+      failures.push({ jobId: "unknown", reason: "求人IDが空です" });
+      continue;
+    }
+
+    const properties = {
+      pipeline: DEAL_PIPELINE_ID,
+      dealstage: INITIAL_DEAL_STAGE_ID,
+      dealname: `${candidateName} × ${jobName}`,
+    };
+    if (ownerId) {
+      properties.hubspot_owner_id = ownerId;
+    }
+
+    try {
+      await client.apiRequest({
+        method: "POST",
+        path: `/crm/v3/objects/${DEAL_OBJECT_TYPE_ID}`,
+        body: {
+          properties,
+          associations: [
+            {
+              to: { id: contactId },
+              types: [
+                {
+                  associationCategory: "HUBSPOT_DEFINED",
+                  associationTypeId: dealToContactTypeId,
+                },
+              ],
+            },
+            {
+              to: { id: jobId },
+              types: [
+                {
+                  associationCategory: "HUBSPOT_DEFINED",
+                  associationTypeId: dealToJobTypeId,
+                },
+              ],
+            },
+          ],
+        },
+      });
+      successCount += 1;
+    } catch (error) {
+      failures.push({
+        jobId,
+        reason: parseErrorMessage(error),
+      });
+    }
+  }
+
+  return {
+    successCount,
+    failureCount: failures.length,
+    failures,
+  };
+};
+
+exports.main = async (context = {}) => {
+  const client = getHubSpotClient();
+  const action = context?.parameters?.action;
+
+  try {
+    if (action === "getFilterOptions") {
+      return await getFilterOptions(client);
+    }
+    if (action === "searchJobs") {
+      return await searchJobs(client, context.parameters);
+    }
+    if (action === "createDealsAndAssociations") {
+      return await createDealsAndAssociations(client, context, context.parameters);
+    }
+
+    return {
+      status: "error",
+      message: `Unsupported action: ${action || "undefined"}`,
+    };
+  } catch (error) {
+    throw new Error(parseErrorMessage(error));
+  }
+};
