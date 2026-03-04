@@ -46,8 +46,9 @@ const searchJobs = async (client, parameters = {}) => {
   const location = toStringOrEmpty(filters.location);
   const syokusyu = toStringOrEmpty(filters.syokusyu);
   const skills = Array.isArray(filters.skills)
-    ? filters.map(toStringOrEmpty).filter(Boolean)
+    ? filters.skills.map(toStringOrEmpty).filter(Boolean)
     : [];
+  const limit = Math.min(Number(pageSize) || 50, 50);
 
   const commonFilters = [];
   if (location) {
@@ -81,18 +82,35 @@ const searchJobs = async (client, parameters = {}) => {
     filterGroups = [{ filters: commonFilters }];
   }
 
-  const body = {
-    limit: Math.min(Number(pageSize) || 50, 50),
-    properties: JOB_PROPERTIES,
-    after: after || undefined,
-    filterGroups: filterGroups.length > 0 ? filterGroups : undefined,
-  };
+  let response;
 
-  const response = await client.apiRequest({
-    method: "POST",
-    path: `/crm/v3/objects/${JOB_OBJECT_TYPE_ID}/search`,
-    body,
-  });
+  // フィルタ未指定時は一覧APIで全件取得（searchで0件になる環境差分を回避）
+  if (filterGroups.length === 0) {
+    const query = new URLSearchParams();
+    query.set("limit", String(limit));
+    if (after) {
+      query.set("after", String(after));
+    }
+    JOB_PROPERTIES.forEach((property) => query.append("properties", property));
+
+    response = await client.apiRequest({
+      method: "GET",
+      path: `/crm/v3/objects/${JOB_OBJECT_TYPE_ID}?${query.toString()}`,
+    });
+  } else {
+    const body = {
+      limit,
+      properties: JOB_PROPERTIES,
+      after: after || undefined,
+      filterGroups,
+    };
+
+    response = await client.apiRequest({
+      method: "POST",
+      path: `/crm/v3/objects/${JOB_OBJECT_TYPE_ID}/search`,
+      body,
+    });
+  }
 
   return {
     jobs: (response.body.results || []).map((record) => ({

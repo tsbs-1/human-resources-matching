@@ -7,7 +7,6 @@ import {
   EmptyState,
   Flex,
   LoadingSpinner,
-  MultiSelect,
   Select,
   Table,
   TableBody,
@@ -75,10 +74,6 @@ hubspot.extend(({ actions, context }) => (
 
 const JobMatchingCard = ({ addAlert, context }) => {
   const [location, setLocation] = useState("");
-  const [syokusyu, setSyokusyu] = useState("");
-  const [skills, setSkills] = useState([]);
-  const [skillOptions, setSkillOptions] = useState([]);
-  const [syokusyuOptions, setSyokusyuOptions] = useState([]);
 
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -96,28 +91,6 @@ const JobMatchingCard = ({ addAlert, context }) => {
     [selectedJobsById]
   );
 
-  const loadFilterOptions = async () => {
-    const response = await hubspot.serverless("jobMatching", {
-      propertiesToSend: [],
-      parameters: {
-        action: "getFilterOptions",
-      },
-    });
-
-    setSkillOptions(
-      (response.skillOptions || []).map((value) => ({
-        label: value,
-        value,
-      }))
-    );
-    setSyokusyuOptions(
-      (response.syokusyuOptions || []).map((value) => ({
-        label: value,
-        value,
-      }))
-    );
-  };
-
   const loadJobs = async ({ targetPageIndex, cursors }) => {
     setLoading(true);
     setResultSummary(null);
@@ -131,8 +104,6 @@ const JobMatchingCard = ({ addAlert, context }) => {
           after,
           filters: {
             location: location || null,
-            syokusyu: syokusyu || null,
-            skills,
           },
         },
       });
@@ -161,18 +132,6 @@ const JobMatchingCard = ({ addAlert, context }) => {
   useEffect(() => {
     let isMounted = true;
     const bootstrap = async () => {
-      try {
-        await loadFilterOptions();
-      } catch (error) {
-        if (!isMounted) {
-          return;
-        }
-        addAlert({
-          title: "フィルタ初期化に失敗しました",
-          message: error.message || "フィルタ候補の取得に失敗しました。",
-          type: "warning",
-        });
-      }
       if (isMounted) {
         await loadJobs({ targetPageIndex: 0, cursors: [null] });
       }
@@ -186,7 +145,7 @@ const JobMatchingCard = ({ addAlert, context }) => {
   useEffect(() => {
     const resetCursors = [null];
     loadJobs({ targetPageIndex: 0, cursors: resetCursors });
-  }, [location, syokusyu, skills.join("|")]);
+  }, [location]);
 
   const toggleSelection = (job) => {
     setSelectedJobsById((prev) => {
@@ -205,8 +164,6 @@ const JobMatchingCard = ({ addAlert, context }) => {
 
   const clearFilters = () => {
     setLocation("");
-    setSyokusyu("");
-    setSkills([]);
   };
 
   const runAssociation = async () => {
@@ -286,20 +243,6 @@ const JobMatchingCard = ({ addAlert, context }) => {
             { label: "全件", value: "" },
             ...PREFECTURES.map((pref) => ({ label: pref, value: pref })),
           ]}
-        />
-        <Select
-          label="職種"
-          name="syokusyu"
-          value={syokusyu}
-          onChange={(value) => setSyokusyu(value || "")}
-          options={[{ label: "全件", value: "" }, ...syokusyuOptions]}
-        />
-        <MultiSelect
-          label="必要スキル（OR一致）"
-          name="skills"
-          value={skills}
-          onChange={(value) => setSkills(value || [])}
-          options={skillOptions}
         />
       </Flex>
       <Button variant="secondary" onClick={clearFilters}>
