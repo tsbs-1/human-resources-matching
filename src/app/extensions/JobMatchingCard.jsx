@@ -65,7 +65,9 @@ const JobMatchingCard = ({ addAlert, context }) => {
       setDebugInfo(
         `取得 ${response.jobs?.length || 0}件 / objectTypeId: ${
           response.objectTypeId || "unknown"
-        }`
+        } / source: ${response.detectionSource || "unknown"} / reason: ${
+          response.detectionReason || "unknown"
+        } / totalHint: ${response.detectionTotal ?? 0}`
       );
       setNextCursor(response.paging?.nextAfter || null);
 

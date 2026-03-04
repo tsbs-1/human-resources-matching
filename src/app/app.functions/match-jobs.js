@@ -16,6 +16,9 @@ const JOB_PROPERTIES = [
   "syokusyu",
 ];
 let cachedJobObjectTypeId = null;
+let cachedDetectionSource = "fallback-primary";
+let cachedDetectionReason = "not-evaluated";
+let cachedDetectionTotal = 0;
 
 const toStringOrEmpty = (value) => {
   if (value === null || value === undefined) {
@@ -59,26 +62,152 @@ const extractResultsAndPaging = (apiResponse) => {
   return { results, nextAfter };
 };
 
-const detectJobObjectTypeId = async (client) => {
-  if (cachedJobObjectTypeId) {
-    return cachedJobObjectTypeId;
-  }
+const fetchFirstRecord = async (client, objectTypeId) => {
+  const query = new URLSearchParams();
+  query.set("limit", "1");
+  // 検出用途ではプロパティを指定しない（候補オブジェクトごとのプロパティ差分で400になるのを回避）
+  const response = await client.apiRequest({
+    method: "GET",
+    path: `/crm/v3/objects/${objectTypeId}?${query.toString()}`,
+  });
+  return extractResultsAndPaging(response).results;
+};
 
+const fetchObjectTotal = async (client, objectTypeId) => {
+  try {
+    const response = await client.apiRequest({
+      method: "POST",
+      path: `/crm/v3/objects/${objectTypeId}/search`,
+      body: { limit: 1 },
+    });
+    const body = response?.body || response || {};
+    const total = Number(body.total);
+    if (Number.isFinite(total)) {
+      return total;
+    }
+    const results = Array.isArray(body.results) ? body.results : [];
+    return results.length;
+  } catch (error) {
+    return 0;
+  }
+};
+
+const scoreSchemaCandidate = (schema) => {
+  const objectTypeId = schema?.objectTypeId || "";
+  const names = [schema?.name, schema?.labels?.singular, schema?.labels?.plural]
+    .map((value) => toStringOrEmpty(value).toLowerCase())
+    .join(" ");
+  let score = 0;
+  if (objectTypeId === PRIMARY_JOB_OBJECT_TYPE_ID) {
+    score += 100;
+  }
+  if (hasJobProperties(schema)) {
+    score += 50;
+  }
+  if (names.includes("job") || names.includes("求人")) {
+    score += 20;
+  }
+  return score;
+};
+
+const detectJobObjectTypeId = async (client) => {
   try {
     const preferred = await client.apiRequest({
       method: "GET",
       path: `/crm/v3/schemas/${PRIMARY_JOB_OBJECT_TYPE_ID}`,
     });
     if (preferred?.body?.objectTypeId && hasJobProperties(preferred.body)) {
-      cachedJobObjectTypeId = preferred.body.objectTypeId;
-      return cachedJobObjectTypeId;
+      try {
+        const records = await fetchFirstRecord(client, preferred.body.objectTypeId);
+        if (records.length > 0) {
+          cachedJobObjectTypeId = preferred.body.objectTypeId;
+          cachedDetectionSource = "primary-with-records";
+          cachedDetectionReason = "primary-object-has-records";
+          cachedDetectionTotal = records.length;
+          return cachedJobObjectTypeId;
+        }
+        cachedDetectionReason = "primary-object-empty";
+      } catch (error) {
+        // Ignore and continue candidate scan.
+        cachedDetectionReason = `primary-probe-failed:${parseErrorMessage(error)}`;
+      }
     }
   } catch (error) {
-    // Ignore and fall back to configured objectTypeId.
+    // Ignore and continue candidate scan.
+    cachedDetectionReason = `primary-schema-read-failed:${parseErrorMessage(error)}`;
+  }
+
+  try {
+    const schemasResponse = await client.apiRequest({
+      method: "GET",
+      path: "/crm/v3/schemas",
+    });
+    const schemas = Array.isArray(schemasResponse?.body?.results)
+      ? schemasResponse.body.results
+      : [];
+
+    const customSchemas = schemas
+      .filter((schema) => toStringOrEmpty(schema?.objectTypeId).startsWith("2-"))
+      .sort((a, b) => scoreSchemaCandidate(b) - scoreSchemaCandidate(a))
+      .slice(0, 40);
+
+    let fallbackCandidate = null;
+    for (const schema of customSchemas) {
+      const objectTypeId = toStringOrEmpty(schema.objectTypeId);
+      if (!objectTypeId) {
+        continue;
+      }
+      const total = await fetchObjectTotal(client, objectTypeId);
+      if (total <= 0) {
+        continue;
+      }
+
+      if (!fallbackCandidate) {
+        fallbackCandidate = { objectTypeId, total };
+      }
+
+      try {
+        const records = await fetchFirstRecord(client, objectTypeId);
+        if (!Array.isArray(records) || records.length === 0) {
+          continue;
+        }
+        const firstProps = records[0]?.properties || {};
+        const hasJobLikeValues =
+          toStringOrEmpty(firstProps.job_name) ||
+          toStringOrEmpty(firstProps.job_id) ||
+          toStringOrEmpty(firstProps.location);
+        if (hasJobLikeValues || objectTypeId === PRIMARY_JOB_OBJECT_TYPE_ID) {
+          cachedJobObjectTypeId = objectTypeId;
+          cachedDetectionSource = `schema-scan:${objectTypeId}`;
+          cachedDetectionReason = "schema-scan-found-records";
+          cachedDetectionTotal = total;
+          return cachedJobObjectTypeId;
+        }
+      } catch (error) {
+        // Ignore invalid/unauthorized schemas and keep scanning.
+      }
+    }
+
+    if (fallbackCandidate) {
+      cachedJobObjectTypeId = fallbackCandidate.objectTypeId;
+      cachedDetectionSource = `schema-scan:${fallbackCandidate.objectTypeId}`;
+      cachedDetectionReason = "schema-scan-found-total-only";
+      cachedDetectionTotal = fallbackCandidate.total;
+      return cachedJobObjectTypeId;
+    }
+    cachedDetectionReason = "schema-scan-no-records";
+  } catch (error) {
+    // Ignore and fall back.
+    cachedDetectionReason = `schema-scan-failed:${parseErrorMessage(error)}`;
   }
 
   // 要件で確定している objectTypeId を最優先で使用する。
   cachedJobObjectTypeId = PRIMARY_JOB_OBJECT_TYPE_ID;
+  cachedDetectionSource = "fallback-primary";
+  cachedDetectionTotal = 0;
+  if (!cachedDetectionReason || cachedDetectionReason === "not-evaluated") {
+    cachedDetectionReason = "fallback-without-candidates";
+  }
   return cachedJobObjectTypeId;
 };
 
@@ -186,6 +315,9 @@ const searchJobs = async (client, parameters = {}) => {
       nextAfter,
     },
     objectTypeId: jobObjectTypeId,
+    detectionSource: cachedDetectionSource,
+    detectionReason: cachedDetectionReason,
+    detectionTotal: cachedDetectionTotal,
   };
 };
 
@@ -400,6 +532,12 @@ const createDealsAndAssociations = async (client, context, parameters = {}) => {
 };
 
 exports.main = async (context = {}) => {
+  // Re-evaluate detection every invocation to avoid stale warm-container cache.
+  cachedJobObjectTypeId = null;
+  cachedDetectionSource = "fallback-primary";
+  cachedDetectionReason = "not-evaluated";
+  cachedDetectionTotal = 0;
+
   const client = getHubSpotClient();
   const action = context?.parameters?.action;
 
