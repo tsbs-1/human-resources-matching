@@ -4,6 +4,7 @@
   "private": true,
   "license": "MIT",
   "dependencies": {
-    "@hubspot/api-client": "latest"
+    "@hubspot/api-client": "latest",
+    "axios": "^1.6.0"
   }
 }

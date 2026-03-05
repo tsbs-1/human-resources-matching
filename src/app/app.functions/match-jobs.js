@@ -1,6 +1,10 @@
 const hubspot = require("@hubspot/api-client");
+const axios = require("axios");
 
+// 求人カスタムオブジェクト（URL例: …/contacts/22314624/objects/2-32777837/…）
+// ポータルID: 22314624 / オブジェクトID: 2-32777837
 const PRIMARY_JOB_OBJECT_TYPE_ID = "2-32777837";
+const HUBSPOT_API_BASE = "https://api.hubapi.com";
 const DEAL_OBJECT_TYPE_ID = "0-3";
 const DEAL_PIPELINE_ID = "17914384";
 const INITIAL_DEAL_STAGE_ID = "45226048";
@@ -31,6 +35,9 @@ const parseErrorMessage = (error) => {
   if (error?.response?.body?.message) {
     return error.response.body.message;
   }
+  if (error?.response?.data?.message) {
+    return error.response.data.message;
+  }
   if (error?.response?.body?.category) {
     return `${error.response.body.category}: ${error.response.body.message || "unknown error"}`;
   }
@@ -56,10 +63,67 @@ const hasJobProperties = (schema) => {
 };
 
 const extractResultsAndPaging = (apiResponse) => {
-  const body = apiResponse?.body || apiResponse || {};
+  // サーバーレス環境で body/data/直接のいずれで返るかに対応
+  const raw =
+    apiResponse?.body ??
+    apiResponse?.data ??
+    (Array.isArray(apiResponse?.results) ? apiResponse : null) ??
+    apiResponse ??
+    {};
+  const body = typeof raw === "object" && raw !== null ? raw : {};
   const results = Array.isArray(body.results) ? body.results : [];
-  const nextAfter = body?.paging?.next?.after || null;
+  const nextAfter = body?.paging?.next?.after ?? null;
   return { results, nextAfter };
+};
+
+// deal-contact-selector と同様に axios で直接 API を叩く（response.data で一意にパース可能）
+const fetchJobListWithAxios = async (objectTypeId, limit, after) => {
+  const token = process.env["PRIVATE_APP_ACCESS_TOKEN"];
+  if (!token) return { results: [], nextAfter: null };
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (after) params.set("after", String(after));
+  JOB_PROPERTIES.forEach((p) => params.append("properties", p));
+  const url = `${HUBSPOT_API_BASE}/crm/v3/objects/${objectTypeId}?${params.toString()}`;
+  const res = await axios.get(url, {
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  const data = res.data || {};
+  return {
+    results: Array.isArray(data.results) ? data.results : [],
+    nextAfter: data?.paging?.next?.after ?? null,
+  };
+};
+
+// 関連付けタイプ取得も axios で確実に response.data.results を取得
+const fetchAssociationTypesWithAxios = async (fromObjectType, toObjectType) => {
+  const token = process.env["PRIVATE_APP_ACCESS_TOKEN"];
+  if (!token) return [];
+  const url = `${HUBSPOT_API_BASE}/crm/v3/associations/${encodeURIComponent(fromObjectType)}/${encodeURIComponent(toObjectType)}/types`;
+  const res = await axios.get(url, {
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  const data = res.data || {};
+  return Array.isArray(data.results) ? data.results : [];
+};
+
+// v4 API で関連付け（deal-contact-selector と同様。Deal 作成時の inline associations は保存されない場合があるため別呼び出し）
+const putAssociationV4 = async (fromObjectType, fromId, toObjectType, toId) => {
+  const token = process.env["PRIVATE_APP_ACCESS_TOKEN"];
+  if (!token) throw new Error("PRIVATE_APP_ACCESS_TOKEN is required");
+  const url = `${HUBSPOT_API_BASE}/crm/v4/objects/${fromObjectType}/${fromId}/associations/default/${toObjectType}/${toId}`;
+  await axios.put(url, null, {
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
 };
 
 const fetchFirstRecord = async (client, objectTypeId) => {
@@ -80,7 +144,8 @@ const fetchObjectTotal = async (client, objectTypeId) => {
       path: `/crm/v3/objects/${objectTypeId}/search`,
       body: { limit: 1 },
     });
-    const body = response?.body || response || {};
+    const raw = response?.body ?? response?.data ?? response ?? {};
+    const body = typeof raw === "object" && raw !== null ? raw : {};
     const total = Number(body.total);
     if (Number.isFinite(total)) {
       return total;
@@ -116,11 +181,12 @@ const detectJobObjectTypeId = async (client) => {
       method: "GET",
       path: `/crm/v3/schemas/${PRIMARY_JOB_OBJECT_TYPE_ID}`,
     });
-    if (preferred?.body?.objectTypeId && hasJobProperties(preferred.body)) {
+    const preferredBody = preferred?.body ?? preferred?.data ?? preferred ?? {};
+    if (preferredBody?.objectTypeId && hasJobProperties(preferredBody)) {
       try {
-        const records = await fetchFirstRecord(client, preferred.body.objectTypeId);
+        const records = await fetchFirstRecord(client, preferredBody.objectTypeId);
         if (records.length > 0) {
-          cachedJobObjectTypeId = preferred.body.objectTypeId;
+          cachedJobObjectTypeId = preferredBody.objectTypeId;
           cachedDetectionSource = "primary-with-records";
           cachedDetectionReason = "primary-object-has-records";
           cachedDetectionTotal = records.length;
@@ -142,9 +208,8 @@ const detectJobObjectTypeId = async (client) => {
       method: "GET",
       path: "/crm/v3/schemas",
     });
-    const schemas = Array.isArray(schemasResponse?.body?.results)
-      ? schemasResponse.body.results
-      : [];
+    const schemasBody = schemasResponse?.body ?? schemasResponse?.data ?? schemasResponse ?? {};
+    const schemas = Array.isArray(schemasBody?.results) ? schemasBody.results : [];
 
     const customSchemas = schemas
       .filter((schema) => toStringOrEmpty(schema?.objectTypeId).startsWith("2-"))
@@ -212,7 +277,6 @@ const detectJobObjectTypeId = async (client) => {
 };
 
 const searchJobs = async (client, parameters = {}) => {
-  const jobObjectTypeId = await detectJobObjectTypeId(client);
   const { filters = {}, after = null, pageSize = 50 } = parameters;
   const queryText = toStringOrEmpty(parameters.query);
   const location = toStringOrEmpty(filters.location);
@@ -257,6 +321,68 @@ const searchJobs = async (client, parameters = {}) => {
   let results = [];
   let nextAfter = null;
 
+  // 検索・フィルタなし: 求人オブジェクトを直接指定して一覧取得（detect を経由しない）
+  // deal-contact-selector と同様に axios を優先（response.data で確実にパース）
+  if (!queryText && filterGroups.length === 0) {
+    const jobObjectTypeId = PRIMARY_JOB_OBJECT_TYPE_ID;
+    try {
+      const axiosResult = await fetchJobListWithAxios(
+        jobObjectTypeId,
+        limit,
+        after || undefined
+      );
+      results = axiosResult.results;
+      nextAfter = axiosResult.nextAfter;
+    } catch (e) {
+      // axios 失敗時は SDK/apiRequest にフォールバック
+    }
+    if (results.length === 0) {
+      try {
+        if (typeof client.crm?.objects?.basicApi?.getPage === "function") {
+          const pageResponse = await client.crm.objects.basicApi.getPage(
+            jobObjectTypeId,
+            limit,
+            after || undefined,
+            JOB_PROPERTIES
+          );
+          const parsed = extractResultsAndPaging(pageResponse);
+          results = parsed.results;
+          nextAfter = parsed.nextAfter;
+        }
+      } catch (e2) {
+        // ignore
+      }
+    }
+    if (results.length === 0) {
+      const query = new URLSearchParams();
+      query.set("limit", String(limit));
+      if (after) {
+        query.set("after", String(after));
+      }
+      JOB_PROPERTIES.forEach((property) => query.append("properties", property));
+      const pageResponse = await client.apiRequest({
+        method: "GET",
+        path: `/crm/v3/objects/${jobObjectTypeId}?${query.toString()}`,
+      });
+      const parsed = extractResultsAndPaging(pageResponse);
+      results = parsed.results;
+      nextAfter = parsed.nextAfter;
+    }
+    return {
+      jobs: results.map((record) => ({
+        id: record.id,
+        properties: record.properties || {},
+      })),
+      paging: { nextAfter },
+      objectTypeId: jobObjectTypeId,
+      detectionSource: "direct-list",
+      detectionReason: "no-query-no-filters",
+      detectionTotal: results.length,
+    };
+  }
+
+  const jobObjectTypeId = await detectJobObjectTypeId(client);
+
   if (queryText) {
     const searchResponse = await client.apiRequest({
       method: "POST",
@@ -271,24 +397,7 @@ const searchJobs = async (client, parameters = {}) => {
     const parsed = extractResultsAndPaging(searchResponse);
     results = parsed.results;
     nextAfter = parsed.nextAfter;
-  }
-
-  // フィルタ未指定時は一覧APIで全件取得（searchで0件になる環境差分を回避）
-  if (results.length === 0 && !queryText && filterGroups.length === 0) {
-    const query = new URLSearchParams();
-    query.set("limit", String(limit));
-    if (after) {
-      query.set("after", String(after));
-    }
-    JOB_PROPERTIES.forEach((property) => query.append("properties", property));
-    const pageResponse = await client.apiRequest({
-      method: "GET",
-      path: `/crm/v3/objects/${jobObjectTypeId}?${query.toString()}`,
-    });
-    const parsed = extractResultsAndPaging(pageResponse);
-    results = parsed.results;
-    nextAfter = parsed.nextAfter;
-  } else if (!queryText) {
+  } else if (filterGroups.length > 0) {
     const body = {
       limit,
       properties: JOB_PROPERTIES,
@@ -328,7 +437,9 @@ const getPropertyOptions = async (client, propertyName) => {
     path: `/crm/v3/properties/${jobObjectTypeId}/${propertyName}`,
   });
 
-  return (response.body.options || [])
+  const raw = response?.body ?? response?.data ?? response ?? {};
+  const options = Array.isArray(raw?.options) ? raw.options : [];
+  return options
     .map((option) => toStringOrEmpty(option.value))
     .filter(Boolean);
 };
@@ -340,7 +451,9 @@ const getPropertyOptionsWithLabel = async (client, propertyName) => {
     path: `/crm/v3/properties/${jobObjectTypeId}/${propertyName}`,
   });
 
-  return (response.body.options || [])
+  const raw = response?.body ?? response?.data ?? response ?? {};
+  const options = Array.isArray(raw?.options) ? raw.options : [];
+  return options
     .map((option) => ({
       label: toStringOrEmpty(option.label) || toStringOrEmpty(option.value),
       value: toStringOrEmpty(option.value),
@@ -360,7 +473,9 @@ const deriveUniqueValuesFromRecords = async (client, propertyName, splitValues) 
   });
 
   const values = new Set();
-  const list = Array.isArray(response?.body?.results) ? response.body.results : [];
+  const raw = response?.body ?? response?.data ?? response ?? {};
+  const body = typeof raw === "object" && raw !== null ? raw : {};
+  const list = Array.isArray(body.results) ? body.results : [];
   for (const record of list) {
     const rawValue = toStringOrEmpty(record.properties?.[propertyName]);
     if (!rawValue) {
@@ -422,20 +537,19 @@ const getLocationOptions = async (client) => {
 };
 
 const getAssociationTypeId = async (client, fromObjectType, toObjectType) => {
-  const response = await client.apiRequest({
-    method: "GET",
-    path: `/crm/v3/associations/${fromObjectType}/${toObjectType}/types`,
-  });
-
-  const candidates = response.body.results || [];
+  let candidates = await fetchAssociationTypesWithAxios(fromObjectType, toObjectType);
+  // 名前で取れない場合は object type ID で再試行（deals=0-3, contacts=0-1）
+  if (candidates.length === 0 && fromObjectType === "deals" && toObjectType === "contacts") {
+    candidates = await fetchAssociationTypesWithAxios("0-3", "0-1");
+  }
+  // HubSpot 標準の deal-contact は type id 3。API が空を返す場合のフォールバック
+  if (candidates.length === 0 && fromObjectType === "deals" && toObjectType === "contacts") {
+    return 3;
+  }
   if (candidates.length === 0) {
     throw new Error(`Association type not found: ${fromObjectType} -> ${toObjectType}`);
   }
-
-  const preferred = candidates.find((type) =>
-    toStringOrEmpty(type.name).startsWith(`${fromObjectType}_to_`)
-  );
-  const selected = preferred || candidates[0];
+  const selected = candidates[0];
   return Number(selected.id);
 };
 
@@ -464,8 +578,8 @@ const createDealsAndAssociations = async (client, context, parameters = {}) => {
   const ownerId = toStringOrEmpty(context?.propertiesToSend?.hubspot_owner_id);
   const candidateName = `${lastName}${firstName}` || "求職者";
 
-  const dealToContactTypeId = await getAssociationTypeId(client, "deals", "contacts");
-  const dealToJobTypeId = await getAssociationTypeId(client, "deals", jobObjectTypeId);
+  const token = process.env["PRIVATE_APP_ACCESS_TOKEN"];
+  if (!token) throw new Error("PRIVATE_APP_ACCESS_TOKEN is required");
 
   let successCount = 0;
   const failures = [];
@@ -488,33 +602,29 @@ const createDealsAndAssociations = async (client, context, parameters = {}) => {
     }
 
     try {
-      await client.apiRequest({
-        method: "POST",
-        path: `/crm/v3/objects/${DEAL_OBJECT_TYPE_ID}`,
-        body: {
-          properties,
-          associations: [
-            {
-              to: { id: contactId },
-              types: [
-                {
-                  associationCategory: "HUBSPOT_DEFINED",
-                  associationTypeId: dealToContactTypeId,
-                },
-              ],
-            },
-            {
-              to: { id: jobId },
-              types: [
-                {
-                  associationCategory: "HUBSPOT_DEFINED",
-                  associationTypeId: dealToJobTypeId,
-                },
-              ],
-            },
-          ],
-        },
-      });
+      // 1) Deal のみ作成（inline associations は保存されないことがあるため使わない）
+      const createRes = await axios.post(
+        `${HUBSPOT_API_BASE}/crm/v3/objects/${DEAL_OBJECT_TYPE_ID}`,
+        { properties },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      const dealId = createRes.data?.id;
+      if (!dealId) {
+        failures.push({ jobId, reason: "Deal 作成後の ID が取得できませんでした" });
+        continue;
+      }
+
+      // 2) v4 で Deal → Contact を関連付け（コンタクトに取引が表示されるようにする）
+      await putAssociationV4("deal", String(dealId), "contact", String(contactId));
+
+      // 3) v4 で Deal → 求人 を関連付け
+      await putAssociationV4("deal", String(dealId), jobObjectTypeId, String(jobId));
+
       successCount += 1;
     } catch (error) {
       failures.push({
