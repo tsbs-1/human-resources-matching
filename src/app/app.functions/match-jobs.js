@@ -277,14 +277,14 @@ const detectJobObjectTypeId = async (client) => {
 };
 
 const searchJobs = async (client, parameters = {}) => {
-  const { filters = {}, after = null, pageSize = 50 } = parameters;
+  const { filters = {}, after = null, pageSize = 10 } = parameters;
   const queryText = toStringOrEmpty(parameters.query);
   const location = toStringOrEmpty(filters.location);
   const syokusyu = toStringOrEmpty(filters.syokusyu);
   const skills = Array.isArray(filters.skills)
     ? filters.skills.map(toStringOrEmpty).filter(Boolean)
     : [];
-  const limit = Math.min(Number(pageSize) || 50, 50);
+  const limit = Math.min(Number(pageSize) || 10, 50);
 
   const commonFilters = [];
   if (location) {

@@ -17,7 +17,7 @@ import {
   Text,
 } from "@hubspot/ui-extensions";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 10;
 
 hubspot.extend(({ actions, context }) => (
   <JobMatchingCard addAlert={actions.addAlert} context={context} />
