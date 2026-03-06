@@ -384,15 +384,27 @@ const searchJobs = async (client, parameters = {}) => {
   const jobObjectTypeId = await detectJobObjectTypeId(client);
 
   if (queryText) {
+    // 検索バーではまず「求人名(job_name)」に対する部分一致検索を行う
+    const searchBody = {
+      limit,
+      properties: JOB_PROPERTIES,
+      after: after || undefined,
+      filterGroups: [
+        {
+          filters: [
+            {
+              propertyName: "job_name",
+              operator: "CONTAINS_TOKEN",
+              value: queryText,
+            },
+          ],
+        },
+      ],
+    };
     const searchResponse = await client.apiRequest({
       method: "POST",
       path: `/crm/v3/objects/${jobObjectTypeId}/search`,
-      body: {
-        limit,
-        properties: JOB_PROPERTIES,
-        after: after || undefined,
-        query: queryText,
-      },
+      body: searchBody,
     });
     const parsed = extractResultsAndPaging(searchResponse);
     results = parsed.results;
