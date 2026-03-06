@@ -223,7 +223,6 @@ const JobMatchingCard = ({ addAlert, context }) => {
 
       <Divider />
 
-      <Text format={{ fontWeight: "demibold" }}>求人一覧</Text>
       {loadError ? <Text>エラー: {loadError}</Text> : null}
       {loading ? (
         <Flex direction="row" gap="small" align="center">
