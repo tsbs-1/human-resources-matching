@@ -205,23 +205,20 @@ const JobMatchingCard = ({ addAlert, context }) => {
 
   return (
     <Flex direction="column" gap="small">
-      <Text format={{ fontWeight: "demibold" }}>検索</Text>
-      <Flex direction="row" gap="small" wrap={true}>
+      <Flex direction="row" gap="small" wrap={true} align="end">
         <Input
           name="job-search"
-          label="検索バー"
+          label=""
           placeholder="求人名 / 求人ID / 勤務地などで検索"
           value={searchQuery}
           onChange={(value) => setSearchQuery(value || "")}
         />
-      </Flex>
-      <Flex direction="row" gap="small">
         <Button variant="primary" onClick={runSearch}>
           検索
         </Button>
-      <Button variant="secondary" onClick={clearSearch}>
-        検索クリア
-      </Button>
+        <Button variant="secondary" onClick={clearSearch}>
+          検索クリア
+        </Button>
       </Flex>
 
       <Divider />
