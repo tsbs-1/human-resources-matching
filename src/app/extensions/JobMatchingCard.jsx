@@ -135,6 +135,10 @@ const JobMatchingCard = ({ addAlert, context }) => {
     setSearchQuery("");
   };
 
+  const runSearch = () => {
+    setDebouncedQuery(searchQuery.trim());
+  };
+
   const runAssociation = async () => {
     if (selectedCount === 0 || isAssociating) {
       return;
@@ -211,9 +215,14 @@ const JobMatchingCard = ({ addAlert, context }) => {
           onChange={(value) => setSearchQuery(value || "")}
         />
       </Flex>
+      <Flex direction="row" gap="small">
+        <Button variant="primary" onClick={runSearch}>
+          検索
+        </Button>
       <Button variant="secondary" onClick={clearSearch}>
         検索クリア
       </Button>
+      </Flex>
 
       <Divider />
 

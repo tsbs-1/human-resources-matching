@@ -381,34 +381,42 @@ const searchJobs = async (client, parameters = {}) => {
     };
   }
 
-  const jobObjectTypeId = await detectJobObjectTypeId(client);
-
   if (queryText) {
-    // 検索バーではまず「求人名(job_name)」に対する部分一致検索を行う
-    const searchBody = {
+    // サーバーサイド検索が環境差分で不安定なため、
+    // axios で一覧を取得して「求人名(job_name)」などをサーバー側でフィルタする
+    const jobObjectTypeId = PRIMARY_JOB_OBJECT_TYPE_ID;
+    const axiosResult = await fetchJobListWithAxios(
+      jobObjectTypeId,
       limit,
-      properties: JOB_PROPERTIES,
-      after: after || undefined,
-      filterGroups: [
-        {
-          filters: [
-            {
-              propertyName: "job_name",
-              operator: "CONTAINS_TOKEN",
-              value: queryText,
-            },
-          ],
-        },
-      ],
-    };
-    const searchResponse = await client.apiRequest({
-      method: "POST",
-      path: `/crm/v3/objects/${jobObjectTypeId}/search`,
-      body: searchBody,
+      after || undefined
+    );
+    const keyword = queryText.toLowerCase();
+    results = axiosResult.results.filter((record) => {
+      const props = record.properties || {};
+      const name = toStringOrEmpty(props.job_name).toLowerCase();
+      const id = toStringOrEmpty(props.job_id).toLowerCase();
+      const locationText = toStringOrEmpty(props.location).toLowerCase();
+      return (
+        name.includes(keyword) ||
+        id.includes(keyword) ||
+        locationText.includes(keyword)
+      );
     });
-    const parsed = extractResultsAndPaging(searchResponse);
-    results = parsed.results;
-    nextAfter = parsed.nextAfter;
+    nextAfter = null;
+
+    return {
+      jobs: results.map((record) => ({
+        id: record.id,
+        properties: record.properties || {},
+      })),
+      paging: {
+        nextAfter: null,
+      },
+      objectTypeId: jobObjectTypeId,
+      detectionSource: "client-filter",
+      detectionReason: "job_name/job_id/location-contains",
+      detectionTotal: axiosResult.results.length,
+    };
   } else if (filterGroups.length > 0) {
     const body = {
       limit,
